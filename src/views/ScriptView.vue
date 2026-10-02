@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWorkshopStore } from '../stores/workshop'
+import { useWorkshopStore, type Cue, type TimelineEventType } from '../stores/workshop'
 
 const store = useWorkshopStore()
 const query = ref('')
@@ -14,15 +14,43 @@ const script = computed(() =>
     .sort((a, b) => a.time.localeCompare(b.time)),
 )
 
+const timelineMeta: Record<TimelineEventType, { label: string; type: 'success' | 'warning' | 'info' | 'danger' }> = {
+  confirm: { label: '确认', type: 'success' },
+  review: { label: '待复核', type: 'danger' },
+  sync: { label: '同步', type: 'success' },
+  conflict: { label: '冲突', type: 'warning' },
+  failure: { label: '失败', type: 'danger' },
+  retry: { label: '重试', type: 'info' },
+  refetch: { label: '取版', type: 'info' },
+  checkpoint: { label: '检查点', type: 'success' },
+}
+
+function cueLabel(cue: Cue): string {
+  return cue.dirty ? '待复核' : cue.status
+}
+
+function cueTagType(cue: Cue): 'success' | 'warning' | 'info' | 'danger' {
+  if (cue.dirty) return 'danger'
+  if (cue.status === '已确认') return 'success'
+  if (cue.status === '待确认') return 'warning'
+  return 'info'
+}
+
 function confirmCue(id: string) {
   store.selectedId = id
-  store.updateCue({ status: '已确认' })
-  ElMessage.success(`${id} 已并入当前排练脚本`)
+  store.confirmCue(id)
+  ElMessage.success(`${id} 已确认并并入基线`)
 }
 
 function lock() {
   store.lockBaseline()
   ElMessage.success('演出基线已锁定，后续修改将从新分支开始')
+}
+
+function formatTime(iso: string): string {
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) return iso
+  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 </script>
 
@@ -32,7 +60,7 @@ function lock() {
       <div>
         <p class="eyebrow">REHEARSAL / 排练脚本</p>
         <h1>按时间顺序编排排练</h1>
-        <p class="muted">提示与走位按时间码串联；未确认节点不会进入锁定基线。</p>
+        <p class="muted">提示与走位按时间码串联；依据变更会联动复核，复核完成前不能打印。</p>
       </div>
       <div class="actions">
         <el-button :disabled="store.locked" @click="lock">锁定演出基线</el-button>
@@ -45,8 +73,8 @@ function lock() {
       <el-input v-model="query" clearable placeholder="搜索提示、角色或说明" style="max-width: 320px" />
       <el-segmented v-model="selectedAct" :options="acts" />
       <div class="baseline-status">
-        <span class="status-dot" :style="{ background: store.locked ? '#41936b' : '#d68c27' }" />
-        {{ store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · ${store.cues.filter((cue) => cue.status !== '已确认').length} 项待确认` }}
+        <span class="status-dot" :style="{ background: store.pendingReviewCount ? '#cf5b3f' : '#41936b' }" />
+        {{ store.pendingReviewCount ? `${store.pendingReviewCount} 项待复核` : store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · 全部依据有效` }}
       </div>
     </div>
 
@@ -61,27 +89,32 @@ function lock() {
             <i />
             <b v-if="index < script.length - 1" />
           </div>
-          <div class="script-card panel">
+          <div class="script-card panel" :class="{ dirty: cue.dirty }">
             <div class="script-card-head">
               <div>
-                <span>{{ cue.id }} · {{ cue.act }} / {{ cue.scene }}</span>
+                <span>{{ cue.id }} · {{ cue.act }} / {{ cue.scene }} · v{{ cue.version }}</span>
                 <h3>{{ cue.title }}</h3>
               </div>
-              <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
-                {{ cue.status }}
-              </el-tag>
+              <el-tag :type="cueTagType(cue)" effect="plain">{{ cueLabel(cue) }}</el-tag>
             </div>
             <p>{{ cue.note || '暂无补充说明' }}</p>
+            <div v-if="cue.dirty" class="review-note">
+              <strong>待复核：</strong>{{ cue.reviewReason }}
+              <span v-if="cue.affectedBy.length">（受 {{ cue.affectedBy.join('、') }} 影响）</span>
+            </div>
             <div class="script-meta">
               <span>责任：{{ cue.owner }}</span>
               <span>部门：{{ cue.department }}</span>
               <span>路线：{{ cue.route.length }} 节点</span>
+              <span v-if="cue.basis">依据：{{ cue.basis.time }} / {{ cue.basis.department }}</span>
               <span v-if="cue.comments.length">留言：{{ cue.comments.length }}</span>
             </div>
             <div class="script-actions">
               <el-button size="small" @click="store.selectedId = cue.id; $router.push('/stage')">编辑走位</el-button>
-              <el-button v-if="cue.status !== '已确认'" size="small" type="primary" plain @click="confirmCue(cue.id)">确认节点</el-button>
-              <span v-else class="confirmed">已纳入 {{ store.revision }}</span>
+              <el-button size="small" type="primary" plain @click="confirmCue(cue.id)">
+                {{ cue.dirty ? '重新确认' : cue.status === '已确认' ? '更新确认' : '确认节点' }}
+              </el-button>
+              <span v-if="cue.status === '已确认' && !cue.dirty" class="confirmed">已纳入 {{ store.revision }}</span>
             </div>
           </div>
         </article>
@@ -89,25 +122,36 @@ function lock() {
 
       <aside class="panel version-panel">
         <div class="panel-head">
-          <h3>版本记录</h3>
-          <span class="muted">自动保存</span>
+          <h3>协同时间线</h3>
+          <span class="muted">原因留痕</span>
         </div>
+
+        <div class="checkpoint-card">
+          <div>
+            <span>最后确认点</span>
+            <strong>{{ store.lastCheckpoint }}</strong>
+          </div>
+          <el-button size="small" :loading="store.syncing" @click="store.retrySync">从确认点重试</el-button>
+        </div>
+
         <div class="version-list">
-          <div class="version active">
-            <span>当前草稿</span>
-            <strong>{{ store.revision }}</strong>
-            <small>{{ store.lastSaved }} · {{ store.cues.length }} 个节点</small>
+          <div v-for="event in store.timeline" :key="event.id" class="version" :class="event.type">
+            <div class="version-head">
+              <el-tag size="small" :type="timelineMeta[event.type].type" effect="plain">{{ timelineMeta[event.type].label }}</el-tag>
+              <time>{{ formatTime(event.time) }}</time>
+            </div>
+            <strong>{{ event.message }}</strong>
+            <small v-if="event.reason">{{ event.reason }}</small>
+            <el-button
+              v-if="event.type === 'failure'"
+              link
+              type="primary"
+              size="small"
+              class="retry-btn"
+              @click="store.retrySync"
+            >重试</el-button>
           </div>
-          <div class="version">
-            <span>舞台调度修订</span>
-            <strong>R11</strong>
-            <small>09-27 14:16 · 陈曦</small>
-          </div>
-          <div class="version">
-            <span>灯光提示更新</span>
-            <strong>R10</strong>
-            <small>09-26 18:42 · 王灯控</small>
-          </div>
+          <el-empty v-if="store.timeline.length === 0" description="暂无协同记录" :image-size="46" />
         </div>
         <div class="version-actions">
           <el-button :disabled="!store.canUndo" @click="store.undo">回退上一步</el-button>
@@ -135,7 +179,7 @@ function lock() {
 
 .script-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 270px;
+  grid-template-columns: minmax(0, 1fr) 300px;
   gap: 18px;
 }
 
@@ -201,6 +245,11 @@ function lock() {
   padding: 13px;
 }
 
+.script-card.dirty {
+  border-left: 3px solid #cf5b3f;
+  background: #fdf6f4;
+}
+
 .script-card-head {
   display: flex;
   justify-content: space-between;
@@ -222,6 +271,15 @@ function lock() {
   color: #55636e;
   font-size: 13px;
   line-height: 1.6;
+}
+
+.review-note {
+  margin: -4px 0 10px;
+  padding: 7px 10px;
+  border-radius: 5px;
+  color: #8c2a1f;
+  background: #fbeae7;
+  font-size: 12px;
 }
 
 .script-meta {
@@ -248,45 +306,100 @@ function lock() {
   align-self: start;
 }
 
+.checkpoint-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 12px;
+  padding: 11px 12px;
+  border: 1px solid #d8e3e1;
+  border-radius: 7px;
+  background: #f2f8f7;
+}
+
+.checkpoint-card span {
+  color: #6b7883;
+  font-size: 11px;
+}
+
+.checkpoint-card strong {
+  display: block;
+  margin-top: 2px;
+  color: #176d6c;
+  font-size: 16px;
+}
+
 .version-list {
-  padding: 10px;
+  display: grid;
+  gap: 8px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 0 12px 12px;
 }
 
 .version {
-  padding: 11px;
-  border-bottom: 1px solid #ebeff1;
+  padding: 10px 11px;
+  border: 1px solid #e6ebed;
+  border-left: 3px solid #cdd7db;
+  border-radius: 6px;
+  background: #fbfcfc;
 }
 
-.version span,
-.version strong,
-.version small {
-  display: block;
+.version.failure {
+  border-left-color: #cf5b3f;
+  background: #fdf6f4;
 }
 
-.version span {
-  color: #53616c;
-  font-size: 12px;
+.version.conflict {
+  border-left-color: #d8912d;
+  background: #fdf8ee;
+}
+
+.version.review {
+  border-left-color: #b03a2e;
+}
+
+.version.sync,
+.version.confirm,
+.version.checkpoint {
+  border-left-color: #3f9d78;
+}
+
+.version-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.version-head time {
+  color: #8a959d;
+  font-size: 10px;
 }
 
 .version strong {
-  margin: 5px 0;
+  display: block;
+  margin: 6px 0 3px;
   color: #183845;
-  font-size: 17px;
+  font-size: 13px;
 }
 
 .version small {
+  display: block;
   color: #8a959d;
+  font-size: 11px;
+  line-height: 1.5;
 }
 
-.version.active {
-  border-left: 3px solid #2c8681;
-  background: #f2f8f7;
+.retry-btn {
+  margin-top: 6px;
 }
 
 .version-actions {
   display: grid;
   gap: 8px;
-  padding: 10px;
+  padding: 10px 12px;
 }
 
 @media (max-width: 900px) {

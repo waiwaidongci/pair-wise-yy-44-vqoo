@@ -48,10 +48,11 @@ const nav = [
 
       <div class="side-card">
         <div class="side-card-title">
-          <span class="status-dot" :style="{ background: store.isOffline ? '#d99a2b' : '#45a878' }" />
-          {{ store.isOffline ? '离线草稿已保存' : '协作服务正常' }}
+          <span class="status-dot" :style="{ background: store.isOffline ? '#d99a2b' : store.pendingReviewCount ? '#cf5b3f' : '#45a878' }" />
+          {{ store.isOffline ? '离线草稿已保存' : store.pendingReviewCount ? `${store.pendingReviewCount} 项待复核` : '协作服务正常' }}
         </div>
         <p>版本 {{ store.revision }} · {{ store.lastSaved }}</p>
+        <p class="checkpoint">最后确认点 {{ store.lastCheckpoint }}</p>
         <button class="ghost-button" @click="store.toggleOffline">
           {{ store.isOffline ? '恢复连接' : '模拟离线' }}
         </button>
@@ -165,6 +166,11 @@ const nav = [
   margin: 8px 0 11px;
   color: #9eb0bc;
   font-size: 11px;
+}
+
+.side-card p.checkpoint {
+  margin-top: -4px;
+  color: #7fa8b2;
 }
 
 .ghost-button {

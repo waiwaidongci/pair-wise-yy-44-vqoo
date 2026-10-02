@@ -18,6 +18,7 @@ const { data: project } = useQuery({
 })
 
 const pending = computed(() => store.cues.filter((cue) => cue.status !== '已确认').length)
+const pendingReview = computed(() => store.pendingReviewCount)
 const comments = computed(() => store.cues.reduce((total, cue) => total + cue.comments.filter((item) => !item.resolved).length, 0))
 const totalMinutes = computed(() => Math.round(store.cues.reduce((sum, cue) => sum + cue.duration, 0) / 60))
 const byDepartment = computed(() =>
@@ -27,6 +28,12 @@ const byDepartment = computed(() =>
   })),
 )
 const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeCompare(b.time)).slice(0, 4))
+const syncState = computed(() => {
+  if (store.conflictState) return { label: '版本冲突', cls: 'conflict' }
+  if (store.syncing) return { label: '同步中', cls: 'syncing' }
+  if (store.isOffline) return { label: '离线草稿', cls: 'offline' }
+  return { label: '多人编辑中', cls: 'online' }
+})
 </script>
 
 <template>
@@ -55,6 +62,11 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
         <small>确认后进入演出基线</small>
       </article>
       <article class="metric">
+        <span>待复核（依据失效）</span>
+        <strong :class="{ red: pendingReview }">{{ pendingReview }}</strong>
+        <small>{{ pendingReview ? '复核完成前不能打印' : '全部依据有效' }}</small>
+      </article>
+      <article class="metric">
         <span>未解决留言</span>
         <strong class="red">{{ comments }}</strong>
         <small>跨部门协同处理中</small>
@@ -70,7 +82,10 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
       <section class="panel">
         <div class="panel-head">
           <h3>下一组执行节点</h3>
-          <span class="online">{{ store.isOffline ? '离线草稿' : '多人编辑中' }}</span>
+          <span class="sync-pill" :class="syncState.cls">
+            <span class="status-dot" :style="{ background: 'currentColor' }" />
+            {{ syncState.label }}
+          </span>
         </div>
         <div class="cue-list">
           <button v-for="cue in nextCues" :key="cue.id" class="cue-row" @click="store.selectedId = cue.id; $router.push('/stage')">
@@ -79,8 +94,8 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
               <strong>{{ cue.title }}</strong>
               <small>{{ cue.act }} / {{ cue.scene }} · {{ cue.owner }}</small>
             </span>
-            <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
-              {{ cue.status }}
+            <el-tag :type="cue.dirty ? 'danger' : cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
+              {{ cue.dirty ? '待复核' : cue.status }}
             </el-tag>
           </button>
         </div>
@@ -208,9 +223,46 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
   line-height: 1.55;
 }
 
-.online {
-  color: #2e8064;
+.metric-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.sync-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  border-radius: 999px;
   font-size: 12px;
+}
+
+.sync-pill .status-dot {
+  width: 7px;
+  height: 7px;
+  margin-right: 0;
+}
+
+.sync-pill.online {
+  color: #2e8064;
+  background: #e6f4ee;
+}
+
+.sync-pill.offline {
+  color: #b77014;
+  background: #fdf3e3;
+}
+
+.sync-pill.syncing {
+  color: #4f6fb0;
+  background: #eaf0fb;
+}
+
+.sync-pill.conflict {
+  color: #bd4b3f;
+  background: #fbeae7;
 }
 
 @media (max-width: 1050px) {

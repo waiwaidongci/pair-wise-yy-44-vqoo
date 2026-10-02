@@ -8,11 +8,23 @@ const includeNotes = ref(true)
 const includeRoutes = ref(true)
 const includeComments = ref(false)
 
+function cueLabel(status: string, dirty: boolean): string {
+  return dirty ? '待复核' : status
+}
+
 function print() {
+  if (!store.canPrint) {
+    ElMessage.warning('尚有提示待复核，复核完成前不能打印')
+    return
+  }
   window.print()
 }
 
 function exportCsv() {
+  if (!store.canPrint) {
+    ElMessage.warning('尚有提示待复核，复核完成前不能导出')
+    return
+  }
   const rows = [
     ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态'],
     ...store.cues.map((cue) => [
@@ -23,10 +35,10 @@ function exportCsv() {
       cue.department,
       cue.owner,
       cue.route.map((point) => `${point.x},${point.y}`).join(' > '),
-      cue.status,
+      cueLabel(cue.status, cue.dirty),
     ]),
   ]
-  const csv = `\uFEFF${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
+  const csv = `﻿${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }))
   const link = document.createElement('a')
   link.href = url
@@ -47,9 +59,24 @@ function exportCsv() {
       </div>
       <div class="actions">
         <el-button @click="exportCsv">导出 CSV</el-button>
-        <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
+        <el-button type="primary" :disabled="!store.canPrint" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="!store.canPrint"
+      class="print-guard no-print"
+      type="error"
+      show-icon
+      :closable="false"
+      title="复核未完成，不能打印下一场"
+      :description="`当前有 ${store.pendingReviewCount} 项提示待复核（${store.blockingScenes.join('、')}）。走位、道具或灯光音响提示变更后，受影响提示须退回待复核并重新确认，锁定节点保留原依据。`"
+    >
+      <div class="guard-actions">
+        <el-button size="small" type="primary" @click="$router.push('/script')">前往复核</el-button>
+        <el-button size="small" @click="$router.push('/stage')">返回舞台走位</el-button>
+      </div>
+    </el-alert>
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
@@ -59,7 +86,7 @@ function exportCsv() {
       <span class="print-revision">版本 {{ store.revision }} · 生成于 {{ new Date().toLocaleString('zh-CN') }}</span>
     </div>
 
-    <article class="print-sheet">
+    <article class="print-sheet" :class="{ locked: !store.canPrint }">
       <header class="sheet-head">
         <div>
           <span>远岸剧团 · STAGE MANAGEMENT</span>
@@ -84,7 +111,7 @@ function exportCsv() {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="cue in [...store.cues].sort((a, b) => a.time.localeCompare(b.time))" :key="cue.id">
+          <tr v-for="cue in [...store.cues].sort((a, b) => a.time.localeCompare(b.time))" :key="cue.id" :class="{ dirty: cue.dirty }">
             <td class="mono">{{ cue.time }}</td>
             <td>{{ cue.act }} / {{ cue.scene }}</td>
             <td>
@@ -95,7 +122,10 @@ function exportCsv() {
             </td>
             <td>{{ cue.department }}<br /><small>{{ cue.owner }}</small></td>
             <td>{{ cue.duration }} 秒</td>
-            <td>{{ cue.status }}</td>
+            <td>
+              <el-tag v-if="cue.dirty" type="danger" size="small" effect="plain">待复核</el-tag>
+              <span v-else>{{ cue.status }}</span>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -112,6 +142,16 @@ function exportCsv() {
 <style scoped>
 .print-page {
   background: #e8ecee;
+}
+
+.print-guard {
+  margin-bottom: 14px;
+}
+
+.guard-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .print-options {
@@ -135,6 +175,10 @@ function exportCsv() {
   padding: 34px;
   background: #fff;
   box-shadow: 0 12px 34px rgb(35 54 65 / 12%);
+}
+
+.print-sheet.locked {
+  opacity: 0.92;
 }
 
 .sheet-head {
@@ -221,6 +265,10 @@ td em {
   color: #1d7371;
   font-family: ui-monospace, monospace;
   font-weight: 700;
+}
+
+tr.dirty td {
+  background: #fdf3f1;
 }
 
 .sheet-foot {

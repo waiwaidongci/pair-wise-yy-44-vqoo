@@ -12,6 +12,20 @@ const acts = ['全部', '第一幕', '第二幕', '第三幕']
 const cue = computed(() => store.selectedCue)
 const routePoints = computed(() => cue.value?.route.map((point) => `${point.x},${point.y}`).join(' ') ?? '')
 const conflictCues = computed(() => new Set(store.conflicts.map((item) => item.id)))
+const activeConflict = computed(() =>
+  store.conflictState && store.conflictState.cueId === cue.value?.id ? store.conflictState : null,
+)
+
+function cueLabel(item: Cue): string {
+  return item.dirty ? '待复核' : item.status
+}
+
+function cueTagType(item: Cue): 'success' | 'warning' | 'info' | 'danger' {
+  if (item.dirty) return 'danger'
+  if (item.status === '已确认') return 'success'
+  if (item.status === '待确认') return 'warning'
+  return 'info'
+}
 
 function selectCue(item: Cue) {
   store.selectedId = item.id
@@ -28,8 +42,29 @@ function addWaypoint(event: MouseEvent) {
 }
 
 function saveCue() {
-  localStorage.setItem('stage-scheduler-last-action', new Date().toISOString())
-  ElMessage.success(store.isOffline ? '已保存到离线草稿' : `已同步 ${store.revision}`)
+  // 即使离线也走 syncAll：失败原因会留在时间线，并从最后确认点重试
+  void store.syncAll()
+}
+
+function submitCue() {
+  if (cue.value) void store.submitCue(cue.value.id)
+}
+
+function refetchCue() {
+  if (cue.value) void store.refetchCue(cue.value.id)
+}
+
+function keepLocal() {
+  store.conflictState = null
+  ElMessage.info('已保留本地草稿，未覆盖现场')
+}
+
+function bumpCollaborator() {
+  if (cue.value) void store.simulateCollaboratorBump(cue.value.id)
+}
+
+function confirmCue() {
+  if (cue.value) store.confirmCue(cue.value.id)
 }
 
 function submitComment() {
@@ -50,12 +85,14 @@ function updateCue(key: keyof Cue, value: unknown) {
       <div>
         <p class="eyebrow">STAGING / 走位编排</p>
         <h1>舞台平面与执行提示</h1>
-        <p class="muted">选择走位后可直接在平面图追加节点；确认锁定时编辑自动停用。</p>
+        <p class="muted">走位、部门或触发时刻变更会联动复核；确认锁定时编辑自动停用。</p>
       </div>
       <div class="actions">
         <el-button :disabled="!store.canUndo || store.locked" @click="store.undo()">撤销</el-button>
         <el-button :disabled="!store.canRedo || store.locked" @click="store.redo()">重做</el-button>
-        <el-button type="primary" @click="saveCue">{{ store.isOffline ? '保存草稿' : '同步版本' }}</el-button>
+        <el-button :loading="store.syncing" @click="saveCue">
+          {{ store.isOffline ? '保存草稿' : '同步版本' }}
+        </el-button>
       </div>
     </div>
 
@@ -67,6 +104,16 @@ function updateCue(key: keyof Cue, value: unknown) {
       :closable="false"
       :title="`发现 ${store.conflicts.length} 个同时触发节点`"
       description="系统已高亮冲突提示，请在右侧检查触发时间与部门优先级。"
+    />
+
+    <el-alert
+      v-if="store.pendingReviewCount"
+      class="conflict-alert"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="`${store.pendingReviewCount} 项提示待复核，复核完成前不能打印`"
+      :description="`涉及场景：${store.blockingScenes.join('、')}。请逐条重新确认后再输出走位表。`"
     />
 
     <div class="toolbar panel">
@@ -116,10 +163,10 @@ function updateCue(key: keyof Cue, value: unknown) {
                 <polyline
                   v-if="item.route.length > 1"
                   :points="item.route.map((point) => `${point.x},${point.y}`).join(' ')"
-                  :class="['route', { selected: item.id === store.selectedId, conflict: conflictCues.has(item.id) }]"
+                  :class="['route', { selected: item.id === store.selectedId, conflict: conflictCues.has(item.id), dirty: item.dirty }]"
                   marker-end="url(#arrow)"
                 />
-                <g class="cue-point" :class="{ selected: item.id === store.selectedId }" @click.stop="selectCue(item)">
+                <g class="cue-point" :class="{ selected: item.id === store.selectedId, dirty: item.dirty }" @click.stop="selectCue(item)">
                   <circle :cx="item.entry.x" :cy="item.entry.y" r="2.8" />
                   <text :x="item.entry.x + 3.2" :y="item.entry.y + 1">{{ item.id }}</text>
                 </g>
@@ -142,11 +189,51 @@ function updateCue(key: keyof Cue, value: unknown) {
         <div v-if="cue" class="editor">
           <div class="editor-title">
             <div>
-              <span>{{ cue.id }} · {{ cue.act }}</span>
+              <span>{{ cue.id }} · {{ cue.act }} · v{{ cue.version }}</span>
               <h3>{{ cue.title }}</h3>
             </div>
-            <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
+            <el-tag :type="cueTagType(cue)" effect="plain">{{ cueLabel(cue) }}</el-tag>
           </div>
+
+          <el-alert
+            v-if="activeConflict"
+            class="conflict-banner"
+            type="warning"
+            show-icon
+            :closable="false"
+            title="版本冲突：服务器已有更新版本"
+            :description="`服务器当前为 v${activeConflict.serverCue.version}，本地为 v${cue.version}。后到版本未被接受，请重新取版后再提交。`"
+          >
+            <div class="conflict-actions">
+              <el-button size="small" type="primary" @click="refetchCue">重新取版</el-button>
+              <el-button size="small" @click="keepLocal">保留本地草稿</el-button>
+            </div>
+          </el-alert>
+
+          <el-alert
+            v-if="cue.dirty"
+            class="review-banner"
+            type="error"
+            show-icon
+            :closable="false"
+            :title="cue.reviewReason || '依据已失效，待复核'"
+            :description="cue.affectedBy.length ? `受影响来源：${cue.affectedBy.join('、')}` : undefined"
+          >
+            <div class="basis-compare">
+              <div class="basis-col">
+                <strong>原依据（锁定）</strong>
+                <span>部门：{{ cue.basis?.department }}</span>
+                <span>触发：{{ cue.basis?.time }}</span>
+                <span>路线：{{ cue.basis?.route.map((point) => `${point.x},${point.y}`).join(' → ') }}</span>
+              </div>
+              <div class="basis-col">
+                <strong>当前值</strong>
+                <span>部门：{{ cue.department }}</span>
+                <span>触发：{{ cue.time }}</span>
+                <span>路线：{{ cue.route.map((point) => `${point.x},${point.y}`).join(' → ') }}</span>
+              </div>
+            </div>
+          </el-alert>
 
           <el-form label-position="top" size="small" :disabled="store.locked">
             <div class="form-grid">
@@ -174,6 +261,14 @@ function updateCue(key: keyof Cue, value: unknown) {
               </div>
             </el-form-item>
           </el-form>
+
+          <div class="editor-actions">
+            <el-button size="small" type="success" plain @click="confirmCue">
+              {{ cue.dirty ? '重新确认' : '确认节点' }}
+            </el-button>
+            <el-button size="small" type="primary" @click="submitCue">提交版本</el-button>
+            <el-button size="small" text @click="bumpCollaborator">模拟协作者提交</el-button>
+          </div>
 
           <div class="comment-block">
             <div class="comment-head">
@@ -211,12 +306,12 @@ function updateCue(key: keyof Cue, value: unknown) {
           v-for="item in [...store.filteredCues].sort((a, b) => a.time.localeCompare(b.time))"
           :key="item.id"
           class="cue-card"
-          :class="{ active: item.id === store.selectedId, conflict: conflictCues.has(item.id) }"
+          :class="{ active: item.id === store.selectedId, conflict: conflictCues.has(item.id), dirty: item.dirty }"
           @click="selectCue(item)"
         >
-          <span>{{ item.id }} · {{ item.department }}</span>
+          <span>{{ item.id }} · {{ item.department }} · v{{ item.version }}</span>
           <strong>{{ item.title }}</strong>
-          <small>{{ item.time }} · {{ item.duration }} 秒</small>
+          <small>{{ item.time }} · {{ item.duration }} 秒 · {{ cueLabel(item) }}</small>
         </button>
       </div>
     </section>
@@ -339,6 +434,11 @@ function updateCue(key: keyof Cue, value: unknown) {
   stroke-dasharray: 2 1.2;
 }
 
+.route.dirty {
+  stroke: #b03a2e;
+  stroke-dasharray: 1.4 1;
+}
+
 .cue-point circle {
   fill: #fff;
   stroke: #247d7b;
@@ -356,6 +456,11 @@ function updateCue(key: keyof Cue, value: unknown) {
   fill: #f7b54b;
   stroke: #9f4a17;
   stroke-width: 1;
+}
+
+.cue-point.dirty circle {
+  fill: #e86a5c;
+  stroke: #8c2a1f;
 }
 
 .waypoint {
@@ -430,6 +535,47 @@ function updateCue(key: keyof Cue, value: unknown) {
   font-size: 18px;
 }
 
+.conflict-banner,
+.review-banner {
+  margin-bottom: 14px;
+}
+
+.conflict-banner :deep(.el-alert__description) {
+  margin-top: 4px;
+}
+
+.conflict-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.basis-compare {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.basis-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: rgb(255 255 255 / 70%);
+}
+
+.basis-col strong {
+  margin-bottom: 2px;
+  color: #8c2a1f;
+}
+
+.basis-col:last-child strong {
+  color: #1f5c5a;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -449,6 +595,13 @@ function updateCue(key: keyof Cue, value: unknown) {
   color: #53606c;
   background: #f6f8f8;
   font-size: 11px;
+}
+
+.editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 12px;
 }
 
 .comment-block {
@@ -532,6 +685,11 @@ function updateCue(key: keyof Cue, value: unknown) {
   border-left: 4px solid #cf5b3f;
 }
 
+.cue-card.dirty {
+  border-left: 4px solid #b03a2e;
+  background: #fdf3f1;
+}
+
 .cue-card span,
 .cue-card small {
   display: block;
@@ -566,6 +724,10 @@ function updateCue(key: keyof Cue, value: unknown) {
   }
 
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .basis-compare {
     grid-template-columns: 1fr;
   }
 }
