@@ -52,7 +52,7 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
       <article class="metric">
         <span>待确认事项</span>
         <strong class="amber">{{ pending }}</strong>
-        <small>确认后进入演出基线</small>
+        <small>含 {{ store.pendingReview.length }} 条联动退回待复核</small>
       </article>
       <article class="metric">
         <span>未解决留言</span>
@@ -70,7 +70,9 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
       <section class="panel">
         <div class="panel-head">
           <h3>下一组执行节点</h3>
-          <span class="online">{{ store.isOffline ? '离线草稿' : '多人编辑中' }}</span>
+          <span class="online">
+            {{ store.isOffline ? '离线草稿' : store.conflictCount ? `${store.conflictCount} 条提交被拒待取版` : '多人编辑中' }}
+          </span>
         </div>
         <div class="cue-list">
           <button v-for="cue in nextCues" :key="cue.id" class="cue-row" @click="store.selectedId = cue.id; $router.push('/stage')">
@@ -79,7 +81,10 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
               <strong>{{ cue.title }}</strong>
               <small>{{ cue.act }} / {{ cue.scene }} · {{ cue.owner }}</small>
             </span>
-            <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
+            <el-tag
+              :type="cue.status === '已确认' ? 'success' : cue.status === '待复核' ? 'danger' : cue.status === '待确认' ? 'warning' : 'info'"
+              effect="plain"
+            >
               {{ cue.status }}
             </el-tag>
           </button>

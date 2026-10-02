@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWorkshopStore } from '../stores/workshop'
+import { useWorkshopStore, type CueStatus, type TimelineEvent } from '../stores/workshop'
 
 const store = useWorkshopStore()
 const query = ref('')
@@ -14,10 +14,24 @@ const script = computed(() =>
     .sort((a, b) => a.time.localeCompare(b.time)),
 )
 
+const statusType = (status: CueStatus) =>
+  status === '已确认' ? 'success' : status === '待复核' ? 'danger' : status === '待确认' ? 'warning' : 'info'
+
+const eventTagType: Record<TimelineEvent['type'], 'success' | 'info' | 'warning' | 'danger'> = {
+  变更: 'warning',
+  失效: 'danger',
+  确认: 'success',
+  同步: 'success',
+  同步失败: 'danger',
+  冲突: 'danger',
+  重试: 'warning',
+  打印: 'info',
+  基线: 'info',
+}
+
 function confirmCue(id: string) {
-  store.selectedId = id
-  store.updateCue({ status: '已确认' })
-  ElMessage.success(`${id} 已并入当前排练脚本`)
+  store.confirmCue(id)
+  ElMessage.success(`${id} 复核通过，已并入当前排练脚本`)
 }
 
 function lock() {
@@ -46,7 +60,12 @@ function lock() {
       <el-segmented v-model="selectedAct" :options="acts" />
       <div class="baseline-status">
         <span class="status-dot" :style="{ background: store.locked ? '#41936b' : '#d68c27' }" />
-        {{ store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · ${store.cues.filter((cue) => cue.status !== '已确认').length} 项待确认` }}
+        {{
+          store.locked
+            ? `基线 ${store.revision} 已锁定`
+            : `${store.revision} · ${store.cues.filter((cue) => cue.status !== '已确认').length} 项待确认` +
+              (store.pendingReview.length ? `（含 ${store.pendingReview.length} 项联动退回）` : '')
+        }}
       </div>
     </div>
 
@@ -67,11 +86,12 @@ function lock() {
                 <span>{{ cue.id }} · {{ cue.act }} / {{ cue.scene }}</span>
                 <h3>{{ cue.title }}</h3>
               </div>
-              <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
+              <el-tag :type="statusType(cue.status)" effect="plain">
                 {{ cue.status }}
               </el-tag>
             </div>
             <p>{{ cue.note || '暂无补充说明' }}</p>
+            <p v-if="cue.status === '待复核'" class="invalid-reason">退回原因：{{ cue.invalidatedReason ?? '联动变更' }}</p>
             <div class="script-meta">
               <span>责任：{{ cue.owner }}</span>
               <span>部门：{{ cue.department }}</span>
@@ -80,8 +100,10 @@ function lock() {
             </div>
             <div class="script-actions">
               <el-button size="small" @click="store.selectedId = cue.id; $router.push('/stage')">编辑走位</el-button>
-              <el-button v-if="cue.status !== '已确认'" size="small" type="primary" plain @click="confirmCue(cue.id)">确认节点</el-button>
-              <span v-else class="confirmed">已纳入 {{ store.revision }}</span>
+              <el-button v-if="cue.status !== '已确认'" size="small" type="primary" plain @click="confirmCue(cue.id)">
+                {{ cue.status === '待复核' ? '复核确认' : '确认节点' }}
+              </el-button>
+              <span v-else class="confirmed">已纳入 {{ cue.confirmedAt ?? store.revision }}</span>
             </div>
           </div>
         </article>
@@ -89,25 +111,23 @@ function lock() {
 
       <aside class="panel version-panel">
         <div class="panel-head">
-          <h3>版本记录</h3>
-          <span class="muted">自动保存</span>
+          <h3>联动时间线</h3>
+          <span class="muted">断点 {{ store.checkpointLabel }}</span>
         </div>
         <div class="version-list">
           <div class="version active">
             <span>当前草稿</span>
             <strong>{{ store.revision }}</strong>
-            <small>{{ store.lastSaved }} · {{ store.cues.length }} 个节点</small>
+            <small>{{ store.lastSaved }} · {{ store.cues.length }} 个节点 · {{ store.dirtyCount }} 条待写入</small>
           </div>
-          <div class="version">
-            <span>舞台调度修订</span>
-            <strong>R11</strong>
-            <small>09-27 14:16 · 陈曦</small>
+          <div v-for="event in store.timeline.slice(0, 14)" :key="event.id" class="version event-item">
+            <span>
+              <el-tag size="small" :type="eventTagType[event.type]" effect="plain">{{ event.type }}</el-tag>
+              {{ event.message }}
+            </span>
+            <small>{{ event.at }} · {{ event.revision }}</small>
           </div>
-          <div class="version">
-            <span>灯光提示更新</span>
-            <strong>R10</strong>
-            <small>09-26 18:42 · 王灯控</small>
-          </div>
+          <el-empty v-if="store.timeline.length === 0" description="暂无联动事件" :image-size="46" />
         </div>
         <div class="version-actions">
           <el-button :disabled="!store.canUndo" @click="store.undo">回退上一步</el-button>
@@ -242,6 +262,20 @@ function lock() {
 .confirmed {
   color: #34805e;
   font-size: 11px;
+}
+
+.invalid-reason {
+  margin: -4px 0 10px;
+  color: #b65348;
+  font-size: 12px;
+}
+
+.event-item span {
+  line-height: 1.6;
+}
+
+.event-item .el-tag {
+  margin-right: 6px;
 }
 
 .version-panel {

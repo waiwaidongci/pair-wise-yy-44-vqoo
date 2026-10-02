@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWorkshopStore, type Cue, type Department } from '../stores/workshop'
+import axios from 'axios'
+import { useWorkshopStore, type Cue, type CueStatus, type Department } from '../stores/workshop'
 
 const store = useWorkshopStore()
 const commentText = ref('')
@@ -12,6 +13,9 @@ const acts = ['全部', '第一幕', '第二幕', '第三幕']
 const cue = computed(() => store.selectedCue)
 const routePoints = computed(() => cue.value?.route.map((point) => `${point.x},${point.y}`).join(' ') ?? '')
 const conflictCues = computed(() => new Set(store.conflicts.map((item) => item.id)))
+
+const statusType = (status: CueStatus) =>
+  status === '已确认' ? 'success' : status === '待复核' ? 'danger' : status === '待确认' ? 'warning' : 'info'
 
 function selectCue(item: Cue) {
   store.selectedId = item.id
@@ -24,12 +28,47 @@ function addWaypoint(event: MouseEvent) {
   const x = Math.round(((event.clientX - rect.left) / rect.width) * 100)
   const y = Math.round(((event.clientY - rect.top) / rect.height) * 100)
   store.addWaypoint({ x, y })
-  ElMessage.success('已追加路线节点')
+  ElMessage.success('已追加路线节点，受影响提示已退回待复核')
 }
 
-function saveCue() {
-  localStorage.setItem('stage-scheduler-last-action', new Date().toISOString())
-  ElMessage.success(store.isOffline ? '已保存到离线草稿' : `已同步 ${store.revision}`)
+async function saveCue() {
+  const current = cue.value
+  if (!current) return
+  const result = await store.syncCue(current.id)
+  if (result === 'ok') {
+    ElMessage.success(`已同步 ${store.revision} · 服务端 v${current.version}`)
+  } else if (result === 'conflict') {
+    ElMessage.warning('协作端已先提交该提示，你的现场已保留，请重新取版')
+  } else {
+    ElMessage.error(`写入失败，已从断点 ${store.checkpointLabel} 保留，可重试`)
+  }
+}
+
+async function retrySync() {
+  await store.syncAll(true)
+  if (store.dirtyCount === 0) ElMessage.success('断点重试完成，全部提示已写入')
+  else ElMessage.warning(`仍有 ${store.dirtyCount} 条未写入，失败原因已记入时间线`)
+}
+
+async function refreshCue() {
+  const current = cue.value
+  if (!current) return
+  await store.refreshCue(current.id)
+  ElMessage.success('已重新取版，本地冲突修改已让位')
+}
+
+async function simulateRemote() {
+  const current = cue.value
+  if (!current) return
+  await axios.post(`/api/cues/${current.id}/remote-edit`)
+  ElMessage.info('协作端已提交同一提示的新版本，再点同步可验证先到先得')
+}
+
+function confirmSelected() {
+  const current = cue.value
+  if (!current) return
+  store.confirmCue(current.id)
+  ElMessage.success(`${current.id} 复核通过，确认依据 ${current.confirmedAt}`)
 }
 
 function submitComment() {
@@ -55,7 +94,12 @@ function updateCue(key: keyof Cue, value: unknown) {
       <div class="actions">
         <el-button :disabled="!store.canUndo || store.locked" @click="store.undo()">撤销</el-button>
         <el-button :disabled="!store.canRedo || store.locked" @click="store.redo()">重做</el-button>
-        <el-button type="primary" @click="saveCue">{{ store.isOffline ? '保存草稿' : '同步版本' }}</el-button>
+        <el-button v-if="store.dirtyCount > 1" :loading="store.syncing" @click="retrySync">
+          断点重试（{{ store.dirtyCount }}）
+        </el-button>
+        <el-button type="primary" :loading="store.syncing" @click="saveCue">
+          {{ store.isOffline ? '保存草稿' : '同步版本' }}
+        </el-button>
       </div>
     </div>
 
@@ -86,7 +130,9 @@ function updateCue(key: keyof Cue, value: unknown) {
       </div>
       <el-switch v-model="showRouteEditor" active-text="路线编辑" />
       <el-button @click="store.addCue" :disabled="store.locked">新增提示</el-button>
+      <el-button text type="info" :disabled="store.isOffline" @click="simulateRemote">模拟协作改单</el-button>
       <el-tag :type="store.locked ? 'success' : 'info'" effect="plain">{{ store.locked ? '基线已锁定' : '草稿编辑中' }}</el-tag>
+      <el-tag v-if="store.pendingReview.length" type="danger" effect="plain">{{ store.pendingReview.length }} 条待复核</el-tag>
     </div>
 
     <div class="work-grid">
@@ -144,9 +190,34 @@ function updateCue(key: keyof Cue, value: unknown) {
             <div>
               <span>{{ cue.id }} · {{ cue.act }}</span>
               <h3>{{ cue.title }}</h3>
+              <small v-if="cue.confirmedAt" class="basis">确认依据 {{ cue.confirmedAt }} · 服务端 v{{ cue.version }}</small>
             </div>
-            <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
+            <el-tag :type="statusType(cue.status)" effect="plain">{{ cue.status }}</el-tag>
           </div>
+
+          <el-alert
+            v-if="cue.syncState === 'conflict'"
+            class="sync-alert"
+            type="error"
+            show-icon
+            :closable="false"
+            title="提交被拒：协作端已先到新版本"
+            description="先到版本已收录，你的现场修改已保留。重新取版后再决定是否重新提交。"
+          >
+            <el-button size="small" type="danger" plain @click="refreshCue">重新取版</el-button>
+          </el-alert>
+
+          <el-alert
+            v-if="cue.status === '待复核'"
+            class="sync-alert"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`待复核：${cue.invalidatedReason ?? '联动变更'}`"
+            description="复核完成前，该节点会阻止打印下一场执行清单。"
+          >
+            <el-button size="small" type="warning" plain :disabled="store.locked" @click="confirmSelected">复核确认</el-button>
+          </el-alert>
 
           <el-form label-position="top" size="small" :disabled="store.locked">
             <div class="form-grid">
@@ -211,12 +282,12 @@ function updateCue(key: keyof Cue, value: unknown) {
           v-for="item in [...store.filteredCues].sort((a, b) => a.time.localeCompare(b.time))"
           :key="item.id"
           class="cue-card"
-          :class="{ active: item.id === store.selectedId, conflict: conflictCues.has(item.id) }"
+          :class="{ active: item.id === store.selectedId, conflict: conflictCues.has(item.id), review: item.status === '待复核' }"
           @click="selectCue(item)"
         >
           <span>{{ item.id }} · {{ item.department }}</span>
           <strong>{{ item.title }}</strong>
-          <small>{{ item.time }} · {{ item.duration }} 秒</small>
+          <small>{{ item.time }} · {{ item.duration }} 秒 · {{ item.status }}</small>
         </button>
       </div>
     </section>
@@ -430,6 +501,21 @@ function updateCue(key: keyof Cue, value: unknown) {
   font-size: 18px;
 }
 
+.basis {
+  display: block;
+  margin-top: 5px;
+  color: #34805e;
+  font-size: 11px;
+}
+
+.sync-alert {
+  margin-bottom: 12px;
+}
+
+.sync-alert .el-button {
+  margin-top: 8px;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -530,6 +616,11 @@ function updateCue(key: keyof Cue, value: unknown) {
 
 .cue-card.conflict {
   border-left: 4px solid #cf5b3f;
+}
+
+.cue-card.review {
+  border-color: #e0a23c;
+  background: #fffaf0;
 }
 
 .cue-card span,

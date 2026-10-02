@@ -9,12 +9,21 @@ const includeRoutes = ref(true)
 const includeComments = ref(false)
 
 function print() {
+  if (!store.canPrint) {
+    ElMessage.error(`还有 ${store.pendingReview.length} 条提示待复核，复核完成前不能打印下一场`)
+    return
+  }
+  store.logPrint()
   window.print()
 }
 
 function exportCsv() {
+  if (!store.canPrint) {
+    ElMessage.error(`还有 ${store.pendingReview.length} 条提示待复核，复核完成前不能导出下一场`)
+    return
+  }
   const rows = [
-    ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态'],
+    ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态', '确认依据'],
     ...store.cues.map((cue) => [
       cue.id,
       cue.time,
@@ -24,6 +33,7 @@ function exportCsv() {
       cue.owner,
       cue.route.map((point) => `${point.x},${point.y}`).join(' > '),
       cue.status,
+      cue.confirmedAt ?? '',
     ]),
   ]
   const csv = `\uFEFF${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
@@ -46,10 +56,21 @@ function exportCsv() {
         <p class="muted">打印版仅包含已选信息，固定 A4 横向布局，适合舞台监督工作台使用。</p>
       </div>
       <div class="actions">
-        <el-button @click="exportCsv">导出 CSV</el-button>
-        <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
+        <el-button v-if="!store.canPrint" type="warning" plain @click="$router.push('/script')">前往复核</el-button>
+        <el-button :disabled="!store.canPrint" @click="exportCsv">导出 CSV</el-button>
+        <el-button type="primary" :disabled="!store.canPrint" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="!store.canPrint"
+      class="gate-alert no-print"
+      type="error"
+      show-icon
+      :closable="false"
+      :title="`还有 ${store.pendingReview.length} 条提示待复核，复核完成前不能打印下一场`"
+      :description="store.pendingReview.map((cue) => `${cue.id} ${cue.title}（${cue.invalidatedReason ?? '联动退回'}）`).join('；')"
+    />
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
@@ -95,7 +116,11 @@ function exportCsv() {
             </td>
             <td>{{ cue.department }}<br /><small>{{ cue.owner }}</small></td>
             <td>{{ cue.duration }} 秒</td>
-            <td>{{ cue.status }}</td>
+            <td>
+              {{ cue.status }}
+              <small v-if="cue.status === '已确认' && cue.confirmedAt">依据 {{ cue.confirmedAt }}</small>
+              <small v-else-if="cue.invalidatedReason" class="review-reason">{{ cue.invalidatedReason }}</small>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -112,6 +137,10 @@ function exportCsv() {
 <style scoped>
 .print-page {
   background: #e8ecee;
+}
+
+.gate-alert {
+  margin-bottom: 14px;
 }
 
 .print-options {
@@ -221,6 +250,10 @@ td em {
   color: #1d7371;
   font-family: ui-monospace, monospace;
   font-weight: 700;
+}
+
+.review-reason {
+  color: #b65348;
 }
 
 .sheet-foot {
